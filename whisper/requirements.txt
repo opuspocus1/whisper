@@ -49,6 +49,7 @@ websockets>=11.0.0
 # Procesamiento de señales
 librosa>=0.10.0
 noisereduce>=3.0.0
+webrtcvad>=2.0.10
 
 # Utilidades adicionales
 tqdm>=4.64.0

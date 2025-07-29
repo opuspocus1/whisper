@@ -8,6 +8,9 @@ import numpy as np
 import torch
 from faster_whisper import WhisperModel
 from config import Config
+import webrtcvad
+import io
+import wave
 
 class FasterWhisperHandler:
     """
@@ -63,12 +66,99 @@ class FasterWhisperHandler:
         self.processing = False
         self.stop_requested = False
         
+        # VAD (Voice Activity Detection)
+        self.vad = webrtcvad.Vad(3)  # Aggressiveness level 3 (0-3)
+        self.speech_buffer = []
+        self.min_speech_duration = 0.5  # Minimum speech duration in seconds
+        self.speech_padding = 0.3  # Padding around speech in seconds
+        
+        # Streaming optimizations
+        self.enable_streaming = True
+        self.min_chunk_duration = 0.5  # Process chunks of at least 0.5 seconds
+        self.max_chunk_duration = 3.0  # Max chunk duration for real-time response
+        
         # Cola de procesamiento y worker thread
         self.processing_queue = queue.Queue(maxsize=10)
         self.worker_thread = None
         self.worker_running = False
         
         self.logger.info(f"FasterWhisperHandler inicializado - Modelo: {self.model_size}, Device: {self.device}")
+    
+    def _is_speech(self, audio_chunk: bytes, sample_rate: int = 16000) -> bool:
+        """
+        Detect if audio chunk contains speech using WebRTC VAD
+        """
+        try:
+            # WebRTC VAD requires 16kHz, 16-bit mono audio in 10, 20, or 30ms frames
+            frame_duration = 30  # ms
+            frame_size = int(sample_rate * frame_duration / 1000) * 2  # 2 bytes per sample
+            
+            # Process frames
+            offset = 0
+            while offset + frame_size <= len(audio_chunk):
+                frame = audio_chunk[offset:offset + frame_size]
+                if self.vad.is_speech(frame, sample_rate):
+                    return True
+                offset += frame_size
+            
+            return False
+        except Exception as e:
+            self.logger.warning(f"VAD error: {e}")
+            return True  # Assume speech on error
+    
+    def _process_audio_with_vad(self, audio_data: np.ndarray, sample_rate: int = 16000) -> List[np.ndarray]:
+        """
+        Process audio with VAD to extract speech segments
+        """
+        # Convert to 16-bit PCM for VAD
+        if audio_data.dtype != np.int16:
+            audio_data = (audio_data * 32767).astype(np.int16)
+        
+        audio_bytes = audio_data.tobytes()
+        
+        # Frame settings for VAD
+        frame_duration = 30  # ms
+        frame_size = int(sample_rate * frame_duration / 1000)
+        frame_bytes = frame_size * 2  # 2 bytes per sample
+        
+        # Detect speech segments
+        speech_segments = []
+        current_segment = []
+        speech_start = None
+        non_speech_duration = 0
+        
+        for i in range(0, len(audio_bytes) - frame_bytes, frame_bytes):
+            frame = audio_bytes[i:i + frame_bytes]
+            is_speech = self._is_speech(frame, sample_rate)
+            
+            if is_speech:
+                if speech_start is None:
+                    speech_start = i / (2 * sample_rate)  # Convert to seconds
+                current_segment.extend(audio_data[i//2:(i+frame_bytes)//2])
+                non_speech_duration = 0
+            else:
+                non_speech_duration += frame_duration / 1000
+                
+                # Add padding to current segment
+                if current_segment and non_speech_duration < self.speech_padding:
+                    current_segment.extend(audio_data[i//2:(i+frame_bytes)//2])
+                
+                # End segment if enough non-speech
+                elif current_segment and non_speech_duration >= self.speech_padding:
+                    segment_duration = len(current_segment) / sample_rate
+                    if segment_duration >= self.min_speech_duration:
+                        speech_segments.append(np.array(current_segment, dtype=np.int16))
+                    current_segment = []
+                    speech_start = None
+                    non_speech_duration = 0
+        
+        # Add final segment if exists
+        if current_segment:
+            segment_duration = len(current_segment) / sample_rate
+            if segment_duration >= self.min_speech_duration:
+                speech_segments.append(np.array(current_segment, dtype=np.int16))
+        
+        return speech_segments
     
     def load_model(self, model_size: str = None) -> bool:
         """
@@ -236,7 +326,7 @@ class FasterWhisperHandler:
             
             # Transcribir
             self.logger.info("Llamando a model.transcribe()...")
-            result = self._transcribe_sync(audio_prepared, options)
+            result = self._transcribe_sync(audio_prepared, sample_rate, options)
             
             # Procesar resultado
             processed_result = self._process_result(result)
@@ -280,30 +370,64 @@ class FasterWhisperHandler:
         
         return audio_data
     
-    def _transcribe_sync(self, audio_data: np.ndarray, options: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    def _transcribe_sync(self, audio_data: np.ndarray, sample_rate: int, 
+                        options: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Transcripción síncrona con faster-whisper optimizada para tiempo real
+        Realizar transcripción síncrona con optimizaciones para tiempo real
         """
-        if options is None:
-            options = {}
-            
+        start_time = time.time()
+        
         try:
-            # Configuración optimizada para tiempo real
-            task = options.get('task', self.task)
+            # Apply VAD for faster processing
+            if self.enable_streaming and hasattr(self, 'vad'):
+                speech_segments = self._process_audio_with_vad(audio_data, sample_rate)
+                if not speech_segments:
+                    self.logger.info("No speech detected by VAD")
+                    return {
+                        'success': True,
+                        'text': '',
+                        'segments': [],
+                        'language': self.language,
+                        'processing_time': time.time() - start_time,
+                        'task': self.task
+                    }
+                
+                # Process only speech segments
+                if len(speech_segments) == 1:
+                    audio_data = speech_segments[0]
+                else:
+                    # Concatenate segments with small silence gaps
+                    silence_gap = np.zeros(int(0.1 * sample_rate), dtype=np.int16)
+                    audio_parts = []
+                    for i, segment in enumerate(speech_segments):
+                        audio_parts.append(segment)
+                        if i < len(speech_segments) - 1:
+                            audio_parts.append(silence_gap)
+                    audio_data = np.concatenate(audio_parts)
             
-            # Parámetros base optimizados (compatibles con faster-whisper)
+            # Configurar parámetros de transcripción optimizados
             transcribe_params = {
                 'language': self.language,
-                'task': task,
-                'temperature': 0.0,          # Respuesta determinista
-                'beam_size': 1,             # Decodificación greedy (más rápida)
-                'best_of': 1,               # Solo una mejor opción
-                'initial_prompt': "Concise translation:",  # Traducción breve
-                'without_timestamps': True, # Sin marcas de tiempo
-                'word_timestamps': False,   # Sin timestamps por palabra
-                'compression_ratio_threshold': 1.5,  # Umbral de compresión
-                'condition_on_previous_text': False, # No condicionar en texto previo
-                'no_speech_threshold': 0.3  # Ignorar silencios
+                'task': options.get('task', self.task),
+                'temperature': 0.0,  # Deterministic for speed
+                'beam_size': 1,      # Greedy decoding for real-time
+                'best_of': 1,
+                'fp16': self.device == "cuda",  # FP16 only on GPU
+                'verbose': False,
+                'initial_prompt': "Concise translation:",
+                'without_timestamps': True,
+                'word_timestamps': False,
+                'compression_ratio_threshold': 2.0,
+                'condition_on_previous_text': False,
+                'no_speech_threshold': 0.3,
+                'vad_filter': True,  # Enable built-in VAD
+                'vad_parameters': {
+                    'threshold': 0.5,
+                    'min_speech_duration_ms': 250,
+                    'min_silence_duration_ms': 100,
+                    'padding_ms': 200,
+                    'max_speech_duration_s': float('inf')
+                }
             }
             
             # Optimizaciones adicionales para modelo tiny

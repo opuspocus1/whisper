@@ -405,6 +405,105 @@ class OptimizedKokoroHandler:
             self.logger.error(f"❌ Synthesis error: {e}")
             return None
     
+    def synthesize_streaming(self, text: str, voice: Optional[str] = None, 
+                           chunk_callback: Optional[Callable[[bytes], None]] = None) -> Dict[str, Any]:
+        """
+        Synthesize text with true streaming for ultra-low latency
+        Calls chunk_callback for each audio chunk as it arrives
+        """
+        try:
+            if not self.is_server_running():
+                raise Exception("Kokoro server is not running")
+            
+            # Start timing
+            start_time = time.time()
+            first_chunk_time = None
+            
+            # Use provided voice or default
+            selected_voice = voice or self.voice
+            
+            # Prepare request data
+            data = {
+                "input": text,
+                "voice": selected_voice,
+                "response_format": "mp3",
+                "use_gpu": True,
+                "speed": 1.0,
+                "optimize_for_latency": True,
+                "stream": True  # Enable streaming on server side
+            }
+            
+            # Make streaming request
+            response = self.session.post(
+                f"{self.api_url}/v1/audio/speech/stream",
+                json=data,
+                timeout=self.streaming_timeout,
+                stream=True,
+                headers={'Connection': 'keep-alive'}
+            )
+            
+            if response.status_code != 200:
+                error_msg = f"Streaming synthesis failed: {response.status_code}"
+                self.logger.error(error_msg)
+                return {
+                    'success': False,
+                    'error': error_msg,
+                    'latency': time.time() - start_time
+                }
+            
+            # Process streaming response
+            audio_chunks = []
+            total_bytes = 0
+            
+            for chunk in response.iter_content(chunk_size=self.chunk_size):
+                if chunk:
+                    # Record first chunk time
+                    if first_chunk_time is None:
+                        first_chunk_time = time.time()
+                        first_byte_latency = first_chunk_time - start_time
+                        self.logger.info(f"⚡ First audio chunk received in {first_byte_latency*1000:.1f}ms")
+                    
+                    # Call chunk callback if provided
+                    if chunk_callback:
+                        chunk_callback(chunk)
+                    
+                    audio_chunks.append(chunk)
+                    total_bytes += len(chunk)
+            
+            # Calculate metrics
+            total_time = time.time() - start_time
+            metrics = PerformanceMetrics(
+                first_byte_latency=first_byte_latency if first_chunk_time else total_time,
+                total_latency=total_time,
+                synthesis_time=total_time,
+                network_time=0.0,
+                buffer_time=0.0,
+                timestamp=time.time()
+            )
+            
+            self._record_metrics(metrics)
+            
+            # Combine chunks
+            audio_data = b''.join(audio_chunks)
+            
+            self.logger.info(f"✅ Streaming synthesis completed in {total_time:.3f}s ({total_bytes} bytes)")
+            
+            return {
+                'success': True,
+                'audio_data': audio_data,
+                'latency': total_time,
+                'first_byte_latency': first_byte_latency if first_chunk_time else total_time,
+                'size': total_bytes
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Streaming synthesis error: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'latency': time.time() - start_time
+            }
+    
     def synthesize_sync(self, 
                        text: str, 
                        voice: Optional[str] = None, 
@@ -446,37 +545,80 @@ class OptimizedKokoroHandler:
     
     def synthesize_async(self, 
                         text: str, 
-                        callback: Optional[Callable] = None, 
-                        voice: Optional[str] = None,
-                        optimize_for_latency: bool = True):
-        """Asynchronous synthesis with ThreadPoolExecutor"""
+                        voice: Optional[str] = None, 
+                        callback: Optional[Callable] = None,
+                        optimize_for_latency: bool = True,
+                        use_streaming: bool = True):
+        """Asynchronous synthesis with ThreadPoolExecutor and streaming support"""
         
         def _synthesize_worker():
             try:
                 start_time = time.time()
-                audio_path = self.synthesize(text, voice, use_gpu=True, optimize_for_latency=optimize_for_latency)
-                total_time = time.time() - start_time
                 
-                if audio_path:
-                    result = {
-                        'success': True,
-                        'audio_path': audio_path,
-                        'audio_data': audio_path,
-                        'error': None,
-                        'latency': total_time
-                    }
+                if use_streaming and optimize_for_latency:
+                    # Use streaming for ultra-low latency
+                    self.logger.info("🚀 Using streaming synthesis for real-time performance")
                     
-                    # Call callbacks
-                    if self.on_audio_ready:
-                        self.on_audio_ready(result)
-                    if callback:
-                        callback(audio_path, None)
+                    # Create a temporary file for streamed audio
+                    import tempfile
+                    temp_file = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+                    
+                    def chunk_callback(chunk):
+                        temp_file.write(chunk)
+                        temp_file.flush()
+                    
+                    result = self.synthesize_streaming(text, voice, chunk_callback)
+                    temp_file.close()
+                    
+                    if result['success']:
+                        audio_path = temp_file.name
+                        total_time = result['latency']
+                        
+                        result = {
+                            'success': True,
+                            'audio_path': audio_path,
+                            'audio_data': audio_path,
+                            'error': None,
+                            'latency': total_time,
+                            'first_byte_latency': result.get('first_byte_latency', total_time)
+                        }
+                        
+                        # Call callbacks
+                        if self.on_audio_ready:
+                            self.on_audio_ready(result)
+                        if callback:
+                            callback(audio_path, None)
+                    else:
+                        error_msg = result.get('error', 'Streaming synthesis failed')
+                        if self.on_error:
+                            self.on_error(error_msg)
+                        if callback:
+                            callback(None, error_msg)
                 else:
-                    error_msg = "Synthesis failed"
-                    if self.on_error:
-                        self.on_error(error_msg)
-                    if callback:
-                        callback(None, error_msg)
+                    # Use regular synthesis
+                    audio_path = self.synthesize(text, voice, use_gpu=True, optimize_for_latency=optimize_for_latency)
+                    total_time = time.time() - start_time
+                    
+                    if audio_path:
+                        result = {
+                            'success': True,
+                            'audio_path': audio_path,
+                            'audio_data': audio_path,
+                            'error': None,
+                            'latency': total_time
+                        }
+                        
+                        # Call callbacks
+                        if self.on_audio_ready:
+                            self.on_audio_ready(result)
+                        if callback:
+                            callback(audio_path, None)
+                    else:
+                        error_msg = "Synthesis failed"
+                        if self.on_error:
+                            self.on_error(error_msg)
+                        if callback:
+                            callback(None, error_msg)
                         
             except Exception as e:
                 error_msg = str(e)

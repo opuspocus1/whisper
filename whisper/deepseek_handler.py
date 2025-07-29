@@ -11,6 +11,10 @@ import threading
 import queue
 from typing import Dict, Any, Optional, Callable
 from openai import OpenAI
+import hashlib
+import json
+import os
+from datetime import datetime, timedelta
 
 class DeepSeekHandler:
     """Manejador para corrección de texto usando Qwen API via OpenRouter"""
@@ -91,6 +95,17 @@ class DeepSeekHandler:
             "- Focus on producing natural, fluent English that sounds native"
             "- Handle colloquialisms and informal speech appropriately"
         )
+
+        # Cache configuration
+        self.enable_cache = True
+        self.cache_dir = os.path.join(os.path.dirname(__file__), '.cache', 'corrections')
+        self.cache_ttl_hours = 24 * 7  # 1 week cache
+        self.max_cache_size = 1000  # Maximum number of cached translations
+        
+        # Initialize cache directory
+        if self.enable_cache:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            self._cleanup_old_cache()
     
     def _get_initial_api_key(self) -> str:
         """Determinar qué API key usar inicialmente"""
@@ -183,26 +198,28 @@ class DeepSeekHandler:
             return False
     
     def correct_text(self, text: str) -> Dict[str, Any]:
-        """Alias para correct_text_sync para compatibilidad"""
-        return self.correct_text_sync(text)
-    
-    def correct_text_sync(self, text: str) -> Dict[str, Any]:
-        """Corregir texto de forma síncrona"""
-        if not self.is_available:
+        """
+        Corregir y traducir texto español usando OpenRouter/Qwen
+        """
+        # Check cache first
+        cached_translation = self._load_from_cache(text)
+        if cached_translation:
+            return {
+                'original_text': text,
+                'corrected_text': cached_translation,
+                'success': True,
+                'error': None,
+                'processing_time': 0.0,
+                'from_cache': True
+            }
+        
+        if not self.client:
+            self.logger.error("Cliente OpenRouter no configurado")
             return {
                 'original_text': text,
                 'corrected_text': text,
                 'success': False,
-                'error': 'Qwen no disponible - verifica tu API key de OpenRouter',
-                'processing_time': 0.0
-            }
-        
-        if not text.strip():
-            return {
-                'original_text': text,
-                'corrected_text': text,
-                'success': True,
-                'error': None,
+                'error': "Cliente OpenRouter no configurado",
                 'processing_time': 0.0
             }
         
@@ -246,6 +263,9 @@ class DeepSeekHandler:
                 self._update_stats(processing_time)
                 
                 self.logger.info(f"Texto corregido con {current_model} en {processing_time:.2f}s")
+                
+                # Save to cache
+                self._save_to_cache(text, corrected_text)
                 
                 return {
                     'original_text': text,
@@ -407,6 +427,96 @@ class DeepSeekHandler:
         self.stop_correction()
         self.client = None
         self.logger.info("OpenRouter Handler limpiado")
+
+    def _get_cache_key(self, text: str) -> str:
+        """Generate a cache key for the given text"""
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
+    
+    def _get_cache_path(self, cache_key: str) -> str:
+        """Get the cache file path for a given cache key"""
+        return os.path.join(self.cache_dir, f"{cache_key}.json")
+    
+    def _load_from_cache(self, text: str) -> Optional[str]:
+        """Load translation from cache if available and not expired"""
+        if not self.enable_cache:
+            return None
+        
+        cache_key = self._get_cache_key(text)
+        cache_path = self._get_cache_path(cache_key)
+        
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                
+                # Check if cache is still valid
+                cached_time = datetime.fromisoformat(cache_data['timestamp'])
+                if datetime.now() - cached_time < timedelta(hours=self.cache_ttl_hours):
+                    self.logger.info(f"Cache hit for text: '{text[:50]}...'")
+                    return cache_data['translation']
+                else:
+                    # Cache expired, remove it
+                    os.remove(cache_path)
+            except Exception as e:
+                self.logger.warning(f"Error loading cache: {e}")
+        
+        return None
+    
+    def _save_to_cache(self, text: str, translation: str):
+        """Save translation to cache"""
+        if not self.enable_cache:
+            return
+        
+        cache_key = self._get_cache_key(text)
+        cache_path = self._get_cache_path(cache_key)
+        
+        try:
+            cache_data = {
+                'text': text,
+                'translation': translation,
+                'timestamp': datetime.now().isoformat(),
+                'model': self.model
+            }
+            
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            
+            self.logger.debug(f"Saved to cache: '{text[:50]}...'")
+        except Exception as e:
+            self.logger.warning(f"Error saving to cache: {e}")
+    
+    def _cleanup_old_cache(self):
+        """Clean up old cache files"""
+        if not self.enable_cache:
+            return
+        
+        try:
+            cache_files = []
+            for filename in os.listdir(self.cache_dir):
+                if filename.endswith('.json'):
+                    filepath = os.path.join(self.cache_dir, filename)
+                    cache_files.append((filepath, os.path.getmtime(filepath)))
+            
+            # Sort by modification time (oldest first)
+            cache_files.sort(key=lambda x: x[1])
+            
+            # Remove old files if we exceed max cache size
+            if len(cache_files) > self.max_cache_size:
+                for filepath, _ in cache_files[:len(cache_files) - self.max_cache_size]:
+                    os.remove(filepath)
+                    self.logger.debug(f"Removed old cache file: {filepath}")
+            
+            # Remove expired files
+            current_time = time.time()
+            ttl_seconds = self.cache_ttl_hours * 3600
+            
+            for filepath, mtime in cache_files:
+                if current_time - mtime > ttl_seconds:
+                    os.remove(filepath)
+                    self.logger.debug(f"Removed expired cache file: {filepath}")
+            
+        except Exception as e:
+            self.logger.warning(f"Error cleaning up cache: {e}")
 
 
 if __name__ == "__main__":

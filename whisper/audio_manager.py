@@ -41,6 +41,11 @@ class AudioManager:
         self.chunk_size = self.audio_config['chunk_size']
         self.format = pyaudio.paInt16
         
+        # Real-time optimizations
+        self.realtime_chunk_size = 512  # Smaller chunks for real-time
+        self.buffer_size = 2048  # Smaller buffer for lower latency
+        self.enable_realtime = True
+        
         # Estados
         self.is_recording = False
         self.is_playing = False
@@ -62,6 +67,10 @@ class AudioManager:
         self.silence_threshold = config.get('advanced', 'silence_detection_threshold', 0.01)
         self.min_speech_duration = config.get('advanced', 'min_speech_duration', 0.5)
         self.max_silence_duration = config.get('advanced', 'max_silence_duration', 2.0)
+        
+        # Real-time speech detection
+        self.realtime_speech_threshold = 0.3  # Faster speech detection
+        self.realtime_max_buffer_duration = 3.0  # Max 3 seconds buffer
         
         # Buffer para detección de actividad de voz
         self.vad_buffer = []
@@ -217,14 +226,19 @@ class AudioManager:
         return (None, pyaudio.paContinue)
     
     def _process_audio_data(self):
-        """Procesar datos de audio en thread separado"""
+        """Procesar datos de audio en thread separado con optimizaciones para tiempo real"""
         audio_buffer = []
-        self.logger.info("Thread de procesamiento de audio iniciado")
+        self.logger.info("Thread de procesamiento de audio iniciado (modo tiempo real)")
+        
+        # Real-time processing variables
+        last_process_time = time.time()
+        min_process_interval = 0.5 if self.enable_realtime else 1.0  # Process every 0.5s in real-time mode
         
         while self.is_recording:
             try:
-                # Obtener datos de la cola
-                audio_data, timestamp = self.audio_queue.get(timeout=0.1)
+                # Obtener datos de la cola con timeout más corto para tiempo real
+                timeout = 0.05 if self.enable_realtime else 0.1
+                audio_data, timestamp = self.audio_queue.get(timeout=timeout)
                 self.logger.debug(f"Audio recibido: {len(audio_data)} muestras")
                 
                 # Aplicar procesamiento de audio
@@ -233,8 +247,14 @@ class AudioManager:
                 # Agregar al buffer
                 audio_buffer.extend(processed_audio)
                 
+                # Real-time processing variables
+                current_time = time.time()
+                buffer_duration = len(audio_buffer) / self.sample_rate
+                time_since_last_process = current_time - last_process_time
+                
                 # Detectar actividad de voz
                 voice_detected = self._detect_voice_activity(processed_audio)
+                
                 if voice_detected:
                     if self.speech_start_time is None:
                         self.speech_start_time = timestamp
@@ -245,11 +265,25 @@ class AudioManager:
                     self.last_speech_time = timestamp
                 
                 # Verificar si hay suficiente audio para procesar
-                if len(audio_buffer) >= self.sample_rate * 2:  # 2 segundos de audio
+                min_buffer_size = self.sample_rate * min_process_interval if self.enable_realtime else self.sample_rate * 2
+                
+                if len(audio_buffer) >= min_buffer_size:
                     self.logger.debug(f"Buffer de audio: {len(audio_buffer)} muestras ({len(audio_buffer)/self.sample_rate:.2f}s)")
                     
+                    # En modo tiempo real, procesar inmediatamente
+                    if self.enable_realtime and voice_detected:
+                        self.logger.info(f"Procesando en tiempo real: {len(audio_buffer)} muestras")
+                        audio_array = np.array(audio_buffer, dtype=np.int16)
+                        
+                        if self.on_audio_data:
+                            self.on_audio_data(audio_array, self.sample_rate)
+                        
+                        # Limpiar buffer después de procesar
+                        audio_buffer = []
+                        last_process_time = current_time
+                        
                     # Verificar si hay silencio prolongado
-                    if (self.last_speech_time and 
+                    elif (self.last_speech_time and 
                         timestamp - self.last_speech_time > self.max_silence_duration):
                         
                         self.logger.info(f"Silencio prolongado detectado. Procesando {len(audio_buffer)} muestras")
@@ -273,6 +307,8 @@ class AudioManager:
                         audio_buffer = []
                         self.speech_start_time = None
                         self.last_speech_time = None
+                
+                last_process_time = current_time # Update last process time after processing
                 
             except queue.Empty:
                 continue

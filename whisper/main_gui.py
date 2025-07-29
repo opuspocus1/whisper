@@ -18,6 +18,7 @@ import json
 import os
 from typing import Optional, Dict, Any
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 
 # Importar componentes del proyecto
 from config import config, Config
@@ -57,6 +58,10 @@ class VoiceTranslatorGUI:
         # Performance monitoring
         self.performance_stats = {}
         self.timing_history = []
+        
+        # Parallel processing
+        self.enable_parallel_processing = True
+        self.processing_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ParallelProc")
         
         # Cola de mensajes para UI
         self.ui_queue = queue.Queue()
@@ -657,7 +662,7 @@ class VoiceTranslatorGUI:
         self.logger.info(f"Whisper configurado para: {self.whisper_task}")
     
     def on_transcription_ready(self, result: Dict[str, Any]):
-        """Callback para transcripción lista"""
+        """Callback para transcripción lista con procesamiento paralelo optimizado"""
         # Calcular tiempo de transcripción
         if hasattr(self, 'transcription_start_time'):
             transcription_time = time.time() - self.transcription_start_time
@@ -670,31 +675,78 @@ class VoiceTranslatorGUI:
             # Verificar si la traducción IA está habilitada
             ai_translation_enabled = self.ai_translation_var.get()
             
-            if ai_translation_enabled:
-                # Modo IA: Whisper transcribió español -> español, usar OpenRouter/Qwen
-                self.ui_queue.put({'type': 'transcription', 'text': text})
-                self.update_status("Traduciendo con IA...")
-                self.correction_start_time = time.time()
-                threading.Thread(
-                    target=self.correct_and_synthesize,
-                    args=(text,),
-                    daemon=True
-                ).start()
+            if self.enable_parallel_processing:
+                # Proceso paralelo optimizado
+                self.logger.info("🚀 Usando procesamiento paralelo para traducción y síntesis")
+                
+                def parallel_process():
+                    try:
+                        if ai_translation_enabled:
+                            # Modo IA: Whisper transcribió español -> español, usar OpenRouter/Qwen
+                            self.ui_queue.put({'type': 'transcription', 'text': text})
+                            self.update_status("Traduciendo con IA...")
+                            self.correction_start_time = time.time()
+                            
+                            # Pre-calentar Kokoro mientras se traduce
+                            if self.kokoro_handler and hasattr(self.kokoro_handler, '_pre_warm_models_async'):
+                                self.kokoro_handler._pre_warm_models_async()
+                            
+                            self.correct_and_synthesize(text)
+                        else:
+                            # Modo directo: Whisper ya tradujo español -> inglés
+                            self.ui_queue.put({'type': 'transcription', 'text': f"[Español detectado]"}) 
+                            self.ui_queue.put({'type': 'translation', 'text': text})
+                            
+                            # Marcar tiempo de corrección como 0 (no se usa IA)
+                            self.correction_start_time = time.time()
+                            correction_time = 0
+                            self.logger.info(f"⏱️ TRADUCCIÓN/IA (modo directo) completada en {correction_time:.2f} segundos")
+                            self.update_timing_display('correction', correction_time)
+                            
+                            # Síntesis paralela con pre-calentamiento
+                            self.synthesis_start_time = time.time()
+                            self.update_status("Sintetizando voz con Kokoro optimizado...")
+                            if self.kokoro_handler:
+                                self.kokoro_handler.synthesize_async(
+                                    text, 
+                                    optimize_for_latency=True,
+                                    use_streaming=True
+                                )
+                            else:
+                                self.tts_manager.synthesize_async(text)
+                    except Exception as e:
+                        self.logger.error(f"Error en procesamiento paralelo: {e}")
+                        self.is_processing = False
+                
+                # Ejecutar en thread pool para evitar bloqueos
+                self.processing_executor.submit(parallel_process)
             else:
-                # Modo directo: Whisper ya tradujo español -> inglés, ir directo a síntesis
-                self.ui_queue.put({'type': 'transcription', 'text': f"[Español detectado]"}) 
-                self.ui_queue.put({'type': 'translation', 'text': text})
-                
-                # Marcar tiempo de corrección como 0 (no se usa IA)
-                self.correction_start_time = time.time()
-                correction_time = 0
-                self.logger.info(f"⏱️ TRADUCCIÓN/IA (modo directo) completada en {correction_time:.2f} segundos")
-                self.update_timing_display('correction', correction_time)
-                
-                # Ir directo a síntesis con el texto ya traducido por Whisper
-                self.synthesis_start_time = time.time()
-                self.update_status("Sintetizando voz...")
-                self.tts_manager.synthesize_async(text)
+                # Procesamiento secuencial tradicional
+                if ai_translation_enabled:
+                    # Modo IA: Whisper transcribió español -> español, usar OpenRouter/Qwen
+                    self.ui_queue.put({'type': 'transcription', 'text': text})
+                    self.update_status("Traduciendo con IA...")
+                    self.correction_start_time = time.time()
+                    threading.Thread(
+                        target=self.correct_and_synthesize,
+                        args=(text,),
+                        daemon=True
+                    ).start()
+                else:
+                    # Modo directo: Whisper ya tradujo español -> inglés, ir directo a síntesis
+                    self.ui_queue.put({'type': 'transcription', 'text': f"[Español detectado]"}) 
+                    self.ui_queue.put({'type': 'translation', 'text': text})
+                    
+                    # Marcar tiempo de corrección como 0 (no se usa IA)
+                    self.correction_start_time = time.time()
+                    correction_time = 0
+                    self.logger.info(f"⏱️ TRADUCCIÓN/IA (modo directo) completada en {correction_time:.2f} segundos")
+                    self.update_timing_display('correction', correction_time)
+                    
+                    # Ir directo a síntesis con el texto ya traducido por Whisper
+                    self.synthesis_start_time = time.time()
+                    self.update_status("Sintetizando voz...")
+                    self.tts_manager.synthesize_async(text)
         else:
             error_msg = result.get('error', 'No se detectó texto')
             self.update_status(f"Error: {error_msg}")
@@ -875,10 +927,20 @@ class VoiceTranslatorGUI:
     #     self.is_processing = False
     
     def correct_and_synthesize(self, spanish_text: str):
-        """Traducir y corregir texto español con OpenRouter/Qwen, luego sintetizar con ElevenLabs"""
+        """Traducir y corregir texto español con OpenRouter/Qwen, luego sintetizar con ElevenLabs - Optimizado para paralelo"""
         try:
             # Verificar si OpenRouter/Qwen está habilitado
             deepseek_config = config.get_deepseek_config()
+            
+            if self.enable_parallel_processing:
+                # Pre-calentar Kokoro en paralelo mientras se traduce
+                kokoro_warmup_future = None
+                if self.kokoro_handler and hasattr(self.kokoro_handler, '_pre_warm_models_async'):
+                    self.logger.info("🔥 Pre-calentando Kokoro en paralelo con traducción")
+                    kokoro_warmup_future = self.processing_executor.submit(
+                        self.kokoro_handler._pre_warm_models_async
+                    )
+            
             if deepseek_config.get('enabled', False) and deepseek_config.get('api_key'):
                 # Traducir y corregir texto español directamente con OpenRouter/Qwen
                 corrected_result = self.deepseek_handler.correct_text(spanish_text)
@@ -1068,6 +1130,11 @@ class VoiceTranslatorGUI:
             
             # if self.translator:
             #     self.translator.cleanup()
+            
+            # Shutdown thread pool executor
+            if hasattr(self, 'processing_executor') and self.processing_executor:
+                self.logger.info("Cerrando thread pool executor...")
+                self.processing_executor.shutdown(wait=True, cancel_futures=True)
             
             # Guardar configuración
             config.save_config()
