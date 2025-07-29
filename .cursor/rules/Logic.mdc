@@ -1,0 +1,5 @@
+---
+description: Composer Agent
+alwaysApply: false
+---
+Never alter logic. Add only in new places; no side effects, no breakage.

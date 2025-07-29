@@ -1,0 +1,130 @@
+{
+    "whisper": {
+        "engine": "faster-whisper",
+        "model_size": "tiny",
+        "language": "es",
+        "task": "translate",
+        "device": "cuda",
+        "compute_type": "int8",
+        "temperature": 0.0,
+        "best_of": 1,
+        "beam_size": 1,
+        "patience": 1.0,
+        "length_penalty": 0.0,
+        "suppress_tokens": "-1",
+        "initial_prompt": "Concise translation:",
+        "condition_on_previous_text": false,
+        "fp16": false,
+        "compression_ratio_threshold": 1.5,
+        "logprob_threshold": -1.0,
+        "no_speech_threshold": 0.3,
+        "enable_timestamps": true,
+        "word_timestamps": false
+    },
+    "audio": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "chunk_size": 1024,
+        "format": "int16",
+        "input_device": 1,
+        "output_device": 6,
+        "noise_reduction": true,
+        "auto_gain_control": true,
+        "echo_cancellation": true,
+        "volume_input": 0.6654761904761904,
+        "volume_output": 0.8
+    },
+    "translation": {
+        "source_language": "es",
+        "target_language": "en",
+        "use_context": true,
+        "preserve_formatting": true,
+        "fallback_translator": "google"
+    },
+    "deepseek": {
+        "api_key": "${DEEPSEEK_API_KEY}",
+        "model": "qwen/qwen3-235b-a22b-2507:free",
+        "fallback_model": "qwen/qwen3-235b-a22b-2507",
+        "base_url": "https://openrouter.ai/api/v1",
+        "use_openrouter": true,
+        "enabled": false,
+        "max_retries": 3,
+        "timeout": 30,
+        "auto_correct": true,
+        "improve_fluency": true,
+        "preserve_meaning": true,
+        "use_dual_keys": false,
+        "api_key_free": "${DEEPSEEK_API_KEY}",
+        "api_key_paid": "",
+        "model_free": "qwen/qwen3-235b-a22b-2507:free",
+        "model_paid": "qwen/qwen3-235b-a22b-2507"
+    },
+    "ui": {
+        "theme": "clam",
+        "language": "es",
+        "window_size": [
+            800,
+            600
+        ],
+        "window_position": [
+            100,
+            100
+        ],
+        "always_on_top": false,
+        "minimize_to_tray": true,
+        "show_waveform": true,
+        "show_confidence": true,
+        "font_size": 12,
+        "font_family": "Segoe UI",
+        "window_width": 800,
+        "window_height": 600
+    },
+    "performance": {
+        "max_audio_length": 30,
+        "processing_timeout": 10,
+        "max_concurrent_requests": 3,
+        "cache_enabled": true,
+        "cache_size": 100,
+        "gpu_acceleration": true,
+        "cpu_threads": 4
+    },
+    "logging": {
+        "level": "INFO",
+        "file_enabled": true,
+        "console_enabled": true,
+        "max_file_size": 10,
+        "backup_count": 5
+    },
+    "advanced": {
+        "real_time_processing": true,
+        "voice_activity_detection": true,
+        "silence_detection_threshold": 0.01,
+        "min_speech_duration": 0.5,
+        "max_silence_duration": 2.0,
+        "auto_punctuation": true,
+        "speaker_diarization": false,
+        "emotion_detection": false,
+        "auto_play_translation": true
+    },
+    "elevenlabs": {
+        "api_key": "${ELEVENLABS_API_KEY}",
+        "voice_id": "Aa6nEBJJMKJwJkCx8VU2",
+        "model_id": "eleven_turbo_v2",
+        "stability": 0.3,
+        "similarity_boost": 0.8,
+        "style": 0.2,
+        "use_speaker_boost": true,
+        "speech_rate": 4.0
+    },
+    "tts": {
+        "engine": "kokoro",
+        "fallback_engine": "elevenlabs",
+        "auto_fallback": false
+    },
+    "kokoro": {
+        "voice": "am_fenrir",
+        "speed": 1.0,
+        "server_host": "localhost",
+        "server_port": 5000
+    }
+}

@@ -1,0 +1,5 @@
+---
+description: Composer Agent
+alwaysApply: false
+---
+Apply diffs only to verified regions; maintain 100 % accuracy, no spillover, halt on doubt.

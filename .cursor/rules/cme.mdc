@@ -1,0 +1,6 @@
+---
+description: Agent Request
+alwaysApply: false
+---
+Keep only past-tense verbs or exact data fields; drop all else.
+Event table: Timestamp field = event-verb + _at/_time (never updated_at, created_at, or noun-based).s

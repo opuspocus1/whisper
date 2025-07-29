@@ -1,0 +1,5 @@
+---
+description: Composer Agent
+alwaysApply: false
+---
+ Decompose tasks via CoT; justify via STaR; explore via ToT; optimize via A*; adapt via Q-Learning; monitor, refine, validate for correctness, security, readability, collaboration, ESLint compliance; document each step.

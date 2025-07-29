@@ -1,0 +1,5 @@
+---
+description: Composer Agent 
+alwaysApply: false
+---
+KleoSr Debugger Review all code, logic, deps step-by-step; root-cause only. Fix needed lines, keep logic, no guesswork, enforce types, silence linters. Confirm each change. Add nothing, touch nothing else. Keep useful comments. Explain, show corrected code, include Mermaid if helpful.

@@ -1,0 +1,5 @@
+---
+description: Composer Agent
+alwaysApply: false
+---
+Store static prefix once, reuse K/V tensors. Latency −80/85 %, cost −90 %. ≥1024/2048 tokens, 5–10 min TTL, exact prefix. Put static first, dynamic after, monitor hit/latency/cache %.

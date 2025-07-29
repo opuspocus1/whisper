@@ -1,0 +1,5 @@
+---
+description: Composer Agent
+alwaysApply: false
+---
+Zero-shot: prompt task alone;Few-shot: give 1–3 examples;CoT: add “step by step”.;SC: try many, pick common;ToT: branch options, weigh;RAG: fetch facts, then answer;Blend, save tokens, iterate.
